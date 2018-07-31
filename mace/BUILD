@@ -25,14 +25,6 @@ config_setting(
 )
 
 config_setting(
-    name = "production_mode",
-    define_values = {
-        "production": "true",
-    },
-    visibility = ["//visibility:public"],
-)
-
-config_setting(
     name = "neon_enabled",
     define_values = {
         "neon": "true",
@@ -60,23 +52,10 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
-cc_binary(
-    name = "libmace.so",
-    linkshared = 1,
-    linkstatic = 0,
-    linkopts = [
-        "-Wl,-soname,libmace.so",
-        "-Wl,--version-script",
-        "mace_version_script.lds",
-    ],
-    deps = [
-        "//mace/ops",
-        ":mace_version_script.lds",
-    ],
-)
-
-cc_library(
-  name = "libmace",
-  srcs = ["libmace.so"],
-  visibility = ["//visibility:public"],
+config_setting(
+    name = "opencl_enabled",
+    define_values = {
+        "opencl": "true",
+    },
+    visibility = ["//visibility:public"],
 )

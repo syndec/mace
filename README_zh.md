@@ -12,6 +12,7 @@
 [路线图](ROADMAP.md) |
 [MACE Model Zoo](https://github.com/XiaoMi/mace-models) |
 [Demo](mace/examples/android) |
+[加入我们](JOBS.md) |
 [English](README.md)
 
 **Mobile AI Compute Engine (MACE)** 是一个专为移动端异构计算平台优化的神经网络计算框架。
@@ -35,19 +36,25 @@
   同时支持在具有POSIX接口的系统的CPU上运行。
 
 ## 开始使用
-* [简介](https://mace.readthedocs.io/en/latest/getting_started/introduction.html)
-* [创建模型部署文件](https://mace.readthedocs.io/en/latest/getting_started/create_a_model_deployment.html)
-* [如何构建](https://mace.readthedocs.io/en/latest/getting_started/how_to_build.html)
+* [简介](https://mace.readthedocs.io/en/latest/introduction.html)
+* [安装](https://mace.readthedocs.io/en/latest/installation/env_requirement.html)
+* [基本用法](https://mace.readthedocs.io/en/latest/user_guide/basic_usage.html)
+* [高级用法](https://mace.readthedocs.io/en/latest/user_guide/advanced_usage.html)
 
 ## 性能评测
 [MACE Model Zoo](https://github.com/XiaoMi/mace-models)
 包含若干常用模型，并且会对一组手机进行每日构建。最新的性能评测结果可以从项目的[持续集成页面获取](https://gitlab.com/llhe/mace-models/pipelines)
 (选择最新的成功的Pipeline，点击*release*可以看到最新的评测结果)。
+同时，可以参考[MobileAIBench](https://github.com/XiaoMi/mobile-ai-bench)项目
+获取MACE与其他框架的对比结果。
 
 ## 交流与反馈
 * 欢迎通过Github Issues提交问题报告与建议
-* 邮件列表: [mace-users@googlegroups.com](mailto:mace-users@googlegroups.com)
 * QQ群: 756046893
+* Slack: [mace-users.slack.com](https://join.slack.com/t/mace-users/shared_invite/enQtMzkzNjM3MzMxODYwLTAyZTAzMzQyNjc0ZGI5YjU3MjI1N2Q2OWI1ODgwZjAwOWVlNzFlMjFmMTgwYzhjNzU4MDMwZWQ1MjhiM2Y4OTE)
 
 ## License
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE)
+
+## 加入我们
+[欢迎加入我们](JOBS.md)。

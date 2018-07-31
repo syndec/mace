@@ -9,7 +9,13 @@ mace/codegen/opencl_bin/
 mace/codegen/tuning/
 mace/codegen/version/
 mace/codegen/engine/
+mace/codegen/lib/
 build/
 docs/_build/
+*.a
+
+.vscode/
+builds/
+mace/examples/android/macelibrary/src/main/cpp/mace/
 
 \.project/

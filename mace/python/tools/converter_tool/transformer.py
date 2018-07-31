@@ -28,21 +28,12 @@ from mace.python.tools.converter_tool.base_converter import MaceKeyword
 from mace.python.tools.converter_tool.base_converter import MaceOp
 from mace.python.tools.converter_tool.base_converter import PaddingMode
 from mace.python.tools.converter_tool.base_converter import TransformerRule
+from mace.python.tools.convert_util import calculate_image_shape
 from mace.python.tools.convert_util import mace_check
+from mace.python.tools.convert_util import OpenCLBufferType
+
 
 OPENCL_IMAGE_MAX_SIZE = 16384
-
-
-class OpenCLBufferType(enum.Enum):
-    CONV2D_FILTER = 0
-    IN_OUT_CHANNEL = 1
-    ARGUMENT = 2
-    IN_OUT_HEIGHT = 3
-    IN_OUT_WIDTH = 4
-    WINOGRAD_FILTER = 5
-    DW_CONV2D_FILTER = 6
-    WEIGHT_HEIGHT = 7
-    WEIGHT_WIDTH = 8
 
 
 class Transformer(base_converter.ConverterInterface):
@@ -101,6 +92,7 @@ class Transformer(base_converter.ConverterInterface):
         self._producer = {}
         self._target_data_format = DataFormat.NHWC
         self._input_output_added = False
+        self._opencl_max_image_size = [0, 0]
 
         if self._option.device == DeviceType.CPU.value:
             self._target_data_format = DataFormat.NCHW
@@ -210,7 +202,7 @@ class Transformer(base_converter.ConverterInterface):
 
         return False
 
-    def safe_remove_node(self, op, replace_op):
+    def safe_remove_node(self, op, replace_op, remove_input_tensor=False):
         """remove op.
         1. change the inputs of its consumers to the outputs of replace_op
         2. if the op is output node, change output node to replace op"""
@@ -249,6 +241,12 @@ class Transformer(base_converter.ConverterInterface):
                                      replace_op.output[i],
                                      op.output[i])
                     replace_op.output[i] = op.output[i]
+
+        if remove_input_tensor:
+            for input_name in op.input:
+                if input_name in self._consts:
+                    const_tensor = self._consts[input_name]
+                    self._model.tensors.remove(const_tensor)
 
         self._model.op.remove(op)
 
@@ -745,6 +743,15 @@ class Transformer(base_converter.ConverterInterface):
                                        "only support concat at "
                                        "channel dimension")
                             arg.i = 3
+                        producer = self._producer[op.input[0]]
+                        input_shape = producer.output_shape[0].dims
+                        if producer.type == MaceOp.FullyConnected.name and \
+                                len(input_shape) == 2:
+                            axis_arg = ConverterUtil.get_arg(
+                                op, MaceKeyword.mace_axis_str)
+                            if axis_arg.i == 1 \
+                                    and self._target_data_format == DataFormat.NHWC:  # noqa
+                                axis_arg.i = 3
 
             elif op.type == MaceOp.Squeeze.name:
                 for arg in op.arg:
@@ -889,10 +896,7 @@ class Transformer(base_converter.ConverterInterface):
                     filter = self._consts[op.input[1]]
                     filter_data = np.array(filter.float_data).reshape(
                         filter.dims)
-                    if op.type == MaceOp.Deconv2D.name:
-                        filter_data = filter_data.transpose(2, 3, 0, 1)
-                    else:
-                        filter_data = filter_data.transpose(3, 2, 0, 1)
+                    filter_data = filter_data.transpose(3, 2, 0, 1)
                     filter.float_data[:] = filter_data.flat
                     filter.dims[:] = filter_data.shape
                 if (op.type == MaceOp.MatMul.name and
@@ -903,8 +907,24 @@ class Transformer(base_converter.ConverterInterface):
                     filter_data = filter_data.transpose(3, 2, 0, 1)
                     filter.float_data[:] = filter_data.flat
                     filter.dims[:] = filter_data.shape
+                if op.type == MaceOp.FullyConnected.name:
+                    weight = self._consts[op.input[1]]
+                    if len(weight.dims) == 4:
+                        weight_data = np.array(weight.float_data).reshape(
+                            weight.dims)
+                        weight_data = weight_data.transpose(3, 2, 0, 1)
+                        weight.float_data[:] = weight_data.flat
+                        weight.dims[:] = weight_data.shape
 
             self.set_filter_format(FilterFormat.OIHW)
+        for op in net.op:
+            if op.type == MaceOp.Deconv2D.name:
+                filter = self._consts[op.input[1]]
+                filter_data = np.array(filter.float_data).reshape(
+                    filter.dims)
+                filter_data = filter_data.transpose(1, 0, 2, 3)
+                filter.float_data[:] = filter_data.flat
+                filter.dims[:] = filter_data.shape
 
         return False
 
@@ -914,12 +934,16 @@ class Transformer(base_converter.ConverterInterface):
         for op in net.op:
             if op.type == MaceOp.FullyConnected.name:
                 weight = self._consts[op.input[1]]
-                input_op = self._producer[op.input[0]]
-                input_shape = list(input_op.output_shape[0].dims)
-                input_data_format = ConverterUtil.data_format(input_op)
-                weight.dims[:] = [weight.dims[0]] + input_shape[1:]
-                if input_data_format == DataFormat.NHWC:
-                    self.transpose_shape(weight.dims, [0, 3, 1, 2])
+                if len(weight.dims) == 2:
+                    input_op = self._producer[op.input[0]]
+                    input_shape = list(input_op.output_shape[0].dims)
+                    input_data_format = ConverterUtil.data_format(input_op)
+                    weight.dims[:] = [weight.dims[0]] + input_shape[1:]
+                    if len(input_shape) == 2:
+                        weight.dims[:] = weight.dims[:] + [1, 1]
+                    if input_data_format == DataFormat.NHWC and \
+                            len(input_shape) == 4:
+                        self.transpose_shape(weight.dims, [0, 3, 1, 2])
 
         return False
 
@@ -940,14 +964,25 @@ class Transformer(base_converter.ConverterInterface):
         arg.name = MaceKeyword.mace_mode
         arg.i = 0
 
+        tensor_shape = list(self._consts[input_name].dims)
         if input_type == OpenCLBufferType.WINOGRAD_FILTER:
             blk_sqr = op.output_shape[0].dims[0]
             wino_blk = int(np.sqrt(blk_sqr)) - 2
             wino_arg = op_def.arg.add()
             wino_arg.name = MaceKeyword.mace_wino_block_size
             wino_arg.i = wino_blk
+            img_shape = calculate_image_shape(input_type, tensor_shape,
+                                              wino_blk)
+        else:
+            img_shape = calculate_image_shape(input_type, tensor_shape)
 
         op.input[input_idx] = output_name
+
+        # update OpenCL max image size
+        self._opencl_max_image_size[0] = max(self._opencl_max_image_size[0],
+                                             img_shape[0])
+        self._opencl_max_image_size[1] = max(self._opencl_max_image_size[1],
+                                             img_shape[1])
 
     def transform_buffer_image(self):
         if self._option.device != DeviceType.GPU.value:
@@ -960,8 +995,10 @@ class Transformer(base_converter.ConverterInterface):
             if op.type == MaceOp.Conv2D.name \
                     or op.type == MaceOp.Deconv2D.name:
                 self.buffer_to_image(op, 1, OpenCLBufferType.CONV2D_FILTER)
-                if len(op.input) >= 3:
+                if len(op.input) >= 3 and op.type == MaceOp.Conv2D.name:
                     self.buffer_to_image(op, 2, OpenCLBufferType.ARGUMENT)
+                elif len(op.input) >= 4 and op.type == MaceOp.Deconv2D.name:
+                    self.buffer_to_image(op, 3, OpenCLBufferType.ARGUMENT)
             elif op.type == MaceOp.DepthwiseConv2d.name:
                 self.buffer_to_image(op, 1, OpenCLBufferType.DW_CONV2D_FILTER)
                 if len(op.input) >= 3:
@@ -995,6 +1032,11 @@ class Transformer(base_converter.ConverterInterface):
                 if ConverterUtil.get_arg(op,
                                          MaceKeyword.mace_activation_type_str).s == ActivationType.PRELU.name:  # noqa
                     self.buffer_to_image(op, 1, OpenCLBufferType.ARGUMENT)
+
+        # Add OpenCL max image size
+        arg = net.arg.add()
+        arg.name = MaceKeyword.mace_opencl_max_image_size
+        arg.ints.extend(self._opencl_max_image_size)
 
         for input_node in self._option.input_nodes.values():
             new_input_name = MaceKeyword.mace_input_node_name \
@@ -1073,34 +1115,74 @@ class Transformer(base_converter.ConverterInterface):
                         and self._producer[consumer.input[1]].type
                             == 'Shape'):
                         self.safe_remove_node(
-                            self._producer[consumer.input[1]], None)
+                            self._producer[consumer.input[1]], None,
+                            remove_input_tensor=True)
                     # remove consumer reshape
-                    self.safe_remove_node(consumer, op)
+                    self.safe_remove_node(consumer, op,
+                                          remove_input_tensor=True)
                     # remove producer reshape
                     self.safe_remove_node(producer,
                                           self._producer.get(producer.input[0],
-                                                             None))
+                                                             None),
+                                          remove_input_tensor=True)
 
                     return True
         return False
 
     def transform_matmul_to_fc(self):
         net = self._model
+        filter_format = self.filter_format()
         for op in net.op:
-            if op.type == MaceOp.MatMul.name:
-                input_shape = self.get_tensor_shape(op.input[0])
-                if len(input_shape) == 4:
-                    _, h, w, _ = self.sort_feature_map_shape(input_shape,
-                                                             ConverterUtil.data_format(self._producer[op.input[0]]))  # noqa
-                    if h == 1 and w == 1 and op.input[1] in self._consts:
-                        weight = self._consts[op.input[1]]
-                        if len(weight.dims) == 2:
-                            op.type = MaceOp.FullyConnected.name
+            # transform input(4D) -> reshape(2D) -> matmul to fc
+            # work for TensorFlow
+            if op.type == MaceOp.Reshape.name and \
+                    op.input[1] in self._consts and \
+                    len(op.output_shape[0].dims) == 2 and \
+                    filter_format == FilterFormat.HWIO:
+                input_op = self._producer[op.input[0]]
+                input_shape = input_op.output_shape[0].dims
+                # check input op
+                if len(input_shape) == 4 and \
+                        np.prod(input_shape[1:]) == op.output_shape[0].dims[1]:
+                    is_fc = True
+                    consumers = self._consumers[op.output[0]]
+                    # check matmul op
+                    for matmul_op in consumers:
+                        if matmul_op.type != MaceOp.MatMul.name:
+                            is_fc = False
+                        else:
+                            weight = self._consts[matmul_op.input[1]]
+                            if len(weight.dims) != 2 or \
+                               weight.dims[0] != op.output_shape[0].dims[1]:
+                                is_fc = False
+                    if is_fc:
+                        print 'convert reshape and matmul to fc'
+                        self.safe_remove_node(op, input_op,
+                                              remove_input_tensor=True)
+                        for matmul_op in consumers:
+                            weight = self._consts[matmul_op.input[1]]
+                            matmul_op.type = MaceOp.FullyConnected.name
                             weight_data = np.array(weight.float_data).reshape(
                                 weight.dims)
-                            weight_data = weight_data.transpose(1, 0)
-                            weight.float_data[:] = weight_data.flat
-                            weight.dims[:] = weight_data.shape
+                            weight.dims[:] = input_shape[1:] + \
+                                [weight_data.shape[1]]
+                        return True
+
+            # transform input(2D) -> matmul to fc
+            if op.type == MaceOp.MatMul.name and \
+                    filter_format == FilterFormat.HWIO:
+                producer = self._producer[op.input[0]]
+                weight = self._consts[op.input[1]]
+                if len(weight.dims) == 2 and \
+                        producer.type != MaceOp.Reshape.name and \
+                        len(producer.output_shape[0].dims) == 2 and \
+                        weight.dims[0] == producer.output_shape[0].dims[1]:
+                    print 'convert matmul to fc'
+                    op.type = MaceOp.FullyConnected.name
+                    weight_data = np.array(weight.float_data).reshape(
+                        weight.dims)
+                    weight.dims[:] = [1, 1] + list(weight_data.shape)
+                    return True
 
         return False
 
@@ -1139,9 +1221,6 @@ class Transformer(base_converter.ConverterInterface):
                     print("transform global conv to fc %s(%s)"
                           % (op.name, op.type))
                     op.type = MaceOp.FullyConnected.name
-                    filter.dims[:] = [out_channels,
-                                      in_channels * filter_width
-                                      * filter_height][:]
 
     def add_device(self):
         # TODO(liuqi) add device definition in OperatorDef

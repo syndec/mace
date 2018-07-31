@@ -14,6 +14,7 @@ load(
     "if_not_hexagon_enabled",
     "if_openmp_enabled",
     "if_neon_enabled",
+    "if_opencl_enabled",
 )
 
 cc_library(
@@ -26,7 +27,7 @@ cc_library(
         exclude = [
             "*_test.cc",
         ],
-    ) + if_android(glob(
+    ) + if_opencl_enabled(glob(
         [
             "runtime/opencl/*.cc",
         ],
@@ -36,7 +37,7 @@ cc_library(
     hdrs = glob([
         "*.h",
         "runtime/cpu/*.h",
-    ]) + if_android(glob(
+    ]) + if_opencl_enabled(glob(
         [
             "runtime/opencl/*.h",
         ],
@@ -48,7 +49,7 @@ cc_library(
     ] + if_openmp_enabled([
         "-fopenmp",
         "-DMACE_ENABLE_OPENMP",
-    ]) + if_android([
+    ]) + if_opencl_enabled([
         "-DMACE_ENABLE_OPENCL",
     ]) + if_hexagon_enabled([
         "-DMACE_ENABLE_HEXAGON",
@@ -61,17 +62,15 @@ cc_library(
     ]),
     deps = [
         "//mace/codegen:generated_version",
-        "//mace/codegen:generated_tuning_params",
         "//mace/proto:mace_cc",
         "//mace/utils",
-    ] + if_android([
+    ] + if_opencl_enabled([
         ":opencl_headers",
         "//mace/codegen:generated_opencl",
         "@half//:half",
     ]) + if_hexagon_enabled([
         "//third_party/nnlib:libhexagon",
     ]),
-    alwayslink = 1,
 )
 
 cc_library(
@@ -110,5 +109,4 @@ cc_library(
         "//external:gflags_nothreads",
         "//mace/utils",
     ],
-    alwayslink = 1,
 )

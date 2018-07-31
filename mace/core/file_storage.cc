@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "mace/core/file_storage.h"
-
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
@@ -25,36 +23,12 @@
 #include <memory>
 #include <utility>
 
+#include "mace/core/file_storage.h"
 #include "mace/utils/logging.h"
 
 namespace mace {
 
-class FileStorageFactory::Impl {
- public:
-  explicit Impl(const std::string &path);
-
-  std::unique_ptr<KVStorage> CreateStorage(const std::string &name);
-
- private:
-  std::string path_;
-};
-
-FileStorageFactory::Impl::Impl(const std::string &path): path_(path) {}
-std::unique_ptr<KVStorage> FileStorageFactory::Impl::CreateStorage(
-    const std::string &name) {
-  return std::move(std::unique_ptr<KVStorage>(
-      new FileStorage(path_ + "/" + name)));
-}
-
-FileStorageFactory::FileStorageFactory(const std::string &path):
-    impl_(new FileStorageFactory::Impl(path)) {}
-
-FileStorageFactory::~FileStorageFactory() = default;
-
-std::unique_ptr<KVStorage> FileStorageFactory::CreateStorage(
-    const std::string &name) {
-  return impl_->CreateStorage(name);
-}
+std::shared_ptr<KVStorageFactory> kStorageFactory = nullptr;
 
 FileStorage::FileStorage(const std::string &file_path):
     data_changed_(false), file_path_(file_path) {}
@@ -63,8 +37,8 @@ int FileStorage::Load() {
   struct stat st;
   if (stat(file_path_.c_str(), &st) == -1) {
     if (errno == ENOENT) {
-      LOG(INFO) << "File " << file_path_
-                << " does not exist";
+      VLOG(1) << "File " << file_path_
+              << " does not exist";
       return 0;
     } else {
       LOG(WARNING) << "Stat file " << file_path_
@@ -147,13 +121,20 @@ int FileStorage::Load() {
   return 0;
 }
 
+void FileStorage::Clear() {
+  utils::WriteLock lock(&data_mutex_);
+  data_.clear();
+  data_changed_ = true;
+}
+
 bool FileStorage::Insert(const std::string &key,
                          const std::vector<unsigned char> &value) {
   utils::WriteLock lock(&data_mutex_);
   auto res = data_.emplace(key, value);
-  if (res.second) {
-    data_changed_ = true;
+  if (!res.second) {
+    data_[key] = value;
   }
+  data_changed_ = true;
   return true;
 }
 

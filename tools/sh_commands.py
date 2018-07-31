@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import falcon_cli
-import filelock
 import glob
 import logging
 import numpy as np
@@ -25,6 +24,7 @@ import subprocess
 import sys
 import time
 import urllib
+import platform
 from enum import Enum
 
 import common
@@ -68,10 +68,12 @@ def device_lock_path(serialno):
 
 
 def device_lock(serialno, timeout=3600):
+    import filelock
     return filelock.FileLock(device_lock_path(serialno), timeout=timeout)
 
 
 def is_device_locked(serialno):
+    import filelock
     try:
         with device_lock(serialno, timeout=0.000001):
             return False
@@ -81,6 +83,11 @@ def is_device_locked(serialno):
 
 class BuildType(object):
     proto = 'proto'
+    code = 'code'
+
+
+class ModelFormat(object):
+    file = 'file'
     code = 'code'
 
 
@@ -101,11 +108,6 @@ def clear_phone_data_dir(serialno, phone_data_dir):
            serialno,
            "shell",
            "rm -rf %s" % phone_data_dir)
-
-
-def clear_model_codegen(model_codegen_dir="mace/codegen/models"):
-    if os.path.exists(model_codegen_dir):
-        sh.rm("-rf", model_codegen_dir)
 
 
 ################################
@@ -141,23 +143,6 @@ def get_target_socs_serialnos(target_socs=None):
     for target_soc in target_socs:
         serialnos.extend(soc_serialnos_map[target_soc])
     return serialnos
-
-
-def get_soc_serial_number_map():
-    serial_numbers = adb_devices()
-    soc_serial_number_map = {}
-    for num in serial_numbers:
-        props = adb_getprop_by_serialno(num)
-        soc_serial_number_map[props["ro.board.platform"]] = num
-    return soc_serial_number_map
-
-
-def get_target_soc_serial_number(target_soc):
-    soc_serial_number_map = get_soc_serial_number_map()
-    serial_number = None
-    if target_soc in soc_serial_number_map:
-        serial_number = soc_serial_number_map[target_soc]
-    return serial_number
 
 
 def adb_getprop_by_serialno(serialno):
@@ -292,7 +277,9 @@ def bazel_build(target,
                 hexagon_mode=False,
                 enable_openmp=True,
                 enable_neon=True,
-                address_sanitizer=False):
+                enable_opencl=True,
+                address_sanitizer=False,
+                extra_args=""):
     print("* Build %s with ABI %s" % (target, abi))
     if abi == "host":
         bazel_args = (
@@ -313,11 +300,16 @@ def bazel_build(target,
             "--define",
             "openmp=%s" % str(enable_openmp).lower(),
             "--define",
+            "opencl=%s" % str(enable_opencl).lower(),
+            "--define",
             "hexagon=%s" % str(hexagon_mode).lower())
     if address_sanitizer:
         bazel_args += ("--config", "asan")
     else:
         bazel_args += ("--config", "optimization")
+    if extra_args:
+        bazel_args += (extra_args, )
+        print bazel_args
     sh.bazel(
         _fg=True,
         *bazel_args)
@@ -356,39 +348,27 @@ def gen_encrypted_opencl_source(codegen_path="mace/codegen"):
 
 
 def gen_mace_engine_factory_source(model_tags,
-                                   model_load_type,
+                                   embed_model_data,
                                    codegen_path="mace/codegen"):
-    print("* Genearte mace engine creator source")
+    print("* Generate mace engine creator source")
     codegen_tools_dir = "%s/engine" % codegen_path
     sh.rm("-rf", codegen_tools_dir)
     sh.mkdir("-p", codegen_tools_dir)
     gen_mace_engine_factory(
         model_tags,
         "mace/python/tools",
-        model_load_type,
+        embed_model_data,
         codegen_tools_dir)
-    print("Genearte mace engine creator source done!\n")
+    print("Generate mace engine creator source done!\n")
 
 
-def pull_binaries(abi, serialno, model_output_dirs,
-                  cl_built_kernel_file_name):
-    compiled_opencl_dir = "/data/local/tmp/mace_run/interior/"
-    mace_run_param_file = "mace_run.config"
-
-    cl_bin_dirs = []
-    for d in model_output_dirs:
-        cl_bin_dirs.append(os.path.join(d, "opencl_bin"))
-    cl_bin_dirs_str = ",".join(cl_bin_dirs)
-    if cl_bin_dirs:
-        cl_bin_dir = cl_bin_dirs_str
-        if os.path.exists(cl_bin_dir):
-            sh.rm("-rf", cl_bin_dir)
-        sh.mkdir("-p", cl_bin_dir)
-        if abi != "host":
-            adb_pull(compiled_opencl_dir + cl_built_kernel_file_name,
-                     cl_bin_dir, serialno)
-            adb_pull("/data/local/tmp/mace_run/%s" % mace_run_param_file,
-                     cl_bin_dir, serialno)
+def pull_file_from_device(serial_num, file_path, file_name, output_dir):
+    if not os.path.exists(output_dir):
+        sh.mkdir("-p", output_dir)
+    output_path = "%s/%s" % (output_dir, file_path)
+    if os.path.exists(output_path):
+        sh.rm('-rf', output_path)
+    adb_pull(file_path + '/' + file_name, output_dir, serial_num)
 
 
 def merge_opencl_binaries(binaries_dirs,
@@ -448,29 +428,52 @@ def merge_opencl_binaries(binaries_dirs,
     np.array(output_byte_array).tofile(output_file_path)
 
 
-def gen_tuning_param_code(model_output_dirs,
-                          codegen_path="mace/codegen"):
-    mace_run_param_file = "mace_run.config"
+def merge_opencl_parameters(binaries_dirs,
+                            cl_parameter_file_name,
+                            output_file_path):
     cl_bin_dirs = []
-    for d in model_output_dirs:
+    for d in binaries_dirs:
         cl_bin_dirs.append(os.path.join(d, "opencl_bin"))
-    cl_bin_dirs_str = ",".join(cl_bin_dirs)
+    # create opencl binary output dir
+    opencl_binary_dir = os.path.dirname(output_file_path)
+    if not os.path.exists(opencl_binary_dir):
+        sh.mkdir("-p", opencl_binary_dir)
+    kvs = {}
+    for binary_dir in cl_bin_dirs:
+        binary_path = os.path.join(binary_dir, cl_parameter_file_name)
+        if not os.path.exists(binary_path):
+            continue
 
-    tuning_codegen_dir = "%s/tuning/" % codegen_path
-    if not os.path.exists(tuning_codegen_dir):
-        sh.mkdir("-p", tuning_codegen_dir)
+        print 'generate opencl parameter from', binary_path
+        with open(binary_path, "rb") as f:
+            binary_array = np.fromfile(f, dtype=np.uint8)
 
-    tuning_param_variable_name = "kTuningParamsData"
-    tuning_param_codegen(cl_bin_dirs_str,
-                         mace_run_param_file,
-                         "%s/tuning_params.cc" % tuning_codegen_dir,
-                         tuning_param_variable_name)
+        idx = 0
+        size, = struct.unpack("Q", binary_array[idx:idx + 8])
+        idx += 8
+        for _ in xrange(size):
+            key_size, = struct.unpack("i", binary_array[idx:idx + 4])
+            idx += 4
+            key, = struct.unpack(
+                str(key_size) + "s", binary_array[idx:idx + key_size])
+            idx += key_size
+            value_size, = struct.unpack("i", binary_array[idx:idx + 4])
+            idx += 4
+            kvs[key] = binary_array[idx:idx + value_size]
+            idx += value_size
 
+    output_byte_array = bytearray()
+    data_size = len(kvs)
+    output_byte_array.extend(struct.pack("Q", data_size))
+    for key, value in kvs.iteritems():
+        key_size = len(key)
+        output_byte_array.extend(struct.pack("i", key_size))
+        output_byte_array.extend(struct.pack(str(key_size) + "s", key))
+        value_size = len(value)
+        output_byte_array.extend(struct.pack("i", value_size))
+        output_byte_array.extend(value)
 
-def gen_mace_version(codegen_path="mace/codegen"):
-    sh.mkdir("-p", "%s/version" % codegen_path)
-    sh.bash("mace/tools/git/gen_version_source.sh",
-            "%s/version/version.cc" % codegen_path)
+    np.array(output_byte_array).tofile(output_file_path)
 
 
 def gen_model_code(model_codegen_dir,
@@ -488,7 +491,7 @@ def gen_model_code(model_codegen_dir,
                    embed_model_data,
                    winograd,
                    obfuscate,
-                   model_build_type,
+                   model_graph_format,
                    data_type,
                    graph_optimize_options):
     bazel_build_common("//mace/python/tools:converter")
@@ -515,7 +518,7 @@ def gen_model_code(model_codegen_dir,
               "--winograd=%s" % winograd,
               "--obfuscate=%s" % obfuscate,
               "--output_dir=%s" % model_codegen_dir,
-              "--model_build_type=%s" % model_build_type,
+              "--model_graph_format=%s" % model_graph_format,
               "--data_type=%s" % data_type,
               "--graph_optimize_options=%s" % graph_optimize_options,
               _fg=True)
@@ -566,28 +569,20 @@ def gen_random_input(model_output_dir,
                     sh.cp("-f", input_file_list[i], dst_input_file)
 
 
-def update_mace_run_lib(build_tmp_binary_dir, linkshared=0):
-    if linkshared == 0:
-        mace_run_filepath = build_tmp_binary_dir + "/mace_run_static"
+def update_mace_run_binary(build_tmp_binary_dir, link_dynamic=False):
+    if link_dynamic:
+        mace_run_filepath = build_tmp_binary_dir + "/mace_run_dynamic"
     else:
-        mace_run_filepath = build_tmp_binary_dir + "/mace_run_shared"
+        mace_run_filepath = build_tmp_binary_dir + "/mace_run_static"
 
     if os.path.exists(mace_run_filepath):
         sh.rm("-rf", mace_run_filepath)
-    if linkshared == 0:
-        sh.cp("-f", "bazel-bin/mace/tools/validation/mace_run_static",
+    if link_dynamic:
+        sh.cp("-f", "bazel-bin/mace/tools/validation/mace_run_dynamic",
               build_tmp_binary_dir)
     else:
-        sh.cp("-f", "bazel-bin/mace/tools/validation/mace_run_shared",
+        sh.cp("-f", "bazel-bin/mace/tools/validation/mace_run_static",
               build_tmp_binary_dir)
-
-
-def touch_tuned_file_flag(build_tmp_binary_dir):
-    sh.touch(build_tmp_binary_dir + '/tuned')
-
-
-def is_binary_tuned(build_tmp_binary_dir):
-    return os.path.exists(build_tmp_binary_dir + '/tuned')
 
 
 def create_internal_storage_dir(serialno, phone_data_dir):
@@ -596,31 +591,10 @@ def create_internal_storage_dir(serialno, phone_data_dir):
     return internal_storage_dir
 
 
-def update_libmace_shared_library(serial_num,
-                                  abi,
-                                  project_name,
-                                  build_output_dir,
-                                  library_output_dir):
-    library_dir = "%s/%s/%s/%s" % (
-            build_output_dir, project_name, library_output_dir, abi)
-
-    if os.path.exists(library_dir):
-        sh.rm("-rf", library_dir)
-    sh.mkdir("-p", library_dir)
-    sh.cp("-f", "bazel-bin/mace/libmace.so", library_dir)
-    sh.cp("-f",
-          "%s/sources/cxx-stl/gnu-libstdc++/4.9/libs/%s/libgnustl_shared.so" %
-          (os.environ["ANDROID_NDK_HOME"], abi),
-          library_dir)
-
-    if os.path.exists("mace/libmace.so"):
-        sh.rm("-f", "mace/libmace.so")
-    sh.cp("-f", "bazel-bin/mace/libmace.so", "mace/")
-
-
 def tuning_run(abi,
                serialno,
-               mace_run_dir,
+               target_dir,
+               target_name,
                vlog_level,
                embed_model_data,
                model_output_dir,
@@ -637,9 +611,10 @@ def tuning_run(abi,
                tuning,
                out_of_range_check,
                phone_data_dir,
-               build_type,
+               model_graph_format,
                opencl_binary_file,
-               shared_library_dir,
+               opencl_parameter_file,
+               libmace_dynamic_library_path,
                omp_num_threads=-1,
                cpu_affinity_policy=1,
                gpu_perf_hint=3,
@@ -648,7 +623,7 @@ def tuning_run(abi,
                output_file_name="model_out",
                runtime_failure_ratio=0.0,
                address_sanitizer=False,
-               linkshared=0):
+               link_dynamic=False):
     print("* Run '%s' with round=%s, restart_round=%s, tuning=%s, "
           "out_of_range_check=%s, omp_num_threads=%s, cpu_affinity_policy=%s, "
           "gpu_perf_hint=%s, gpu_priority_hint=%s" %
@@ -656,19 +631,18 @@ def tuning_run(abi,
            str(out_of_range_check), omp_num_threads, cpu_affinity_policy,
            gpu_perf_hint, gpu_priority_hint))
     mace_model_path = ""
-    if build_type == BuildType.proto:
+    if model_graph_format == ModelFormat.file:
         mace_model_path = "%s/%s.pb" % (mace_model_dir, model_tag)
-    if linkshared == 0:
-        mace_run_target = "mace_run_static"
-    else:
-        mace_run_target = "mace_run_shared"
     if abi == "host":
+        libmace_dynamic_lib_path = \
+            os.path.dirname(libmace_dynamic_library_path)
         p = subprocess.Popen(
             [
                 "env",
+                "LD_LIBRARY_PATH=%s" % libmace_dynamic_lib_path,
                 "MACE_CPP_MIN_VLOG_LEVEL=%s" % vlog_level,
                 "MACE_RUNTIME_FAILURE_RATIO=%f" % runtime_failure_ratio,
-                "%s/%s" % (mace_run_dir, mace_run_target),
+                "%s/%s" % (target_dir, target_name),
                 "--model_name=%s" % model_tag,
                 "--input_node=%s" % ",".join(input_nodes),
                 "--output_node=%s" % ",".join(output_nodes),
@@ -692,7 +666,6 @@ def tuning_run(abi,
         stdout = err + out
         print stdout
         print("Running finished!\n")
-        return stdout
     else:
         sh.adb("-s", serialno, "shell", "mkdir", "-p", phone_data_dir)
         internal_storage_dir = create_internal_storage_dir(
@@ -710,28 +683,27 @@ def tuning_run(abi,
             adb_push("%s/%s.data" % (mace_model_dir, model_tag),
                      phone_data_dir, serialno)
 
-        if device_type == common.DeviceType.GPU\
-                and os.path.exists(opencl_binary_file):
-            adb_push(opencl_binary_file, phone_data_dir, serialno)
+        if device_type == common.DeviceType.GPU:
+            if os.path.exists(opencl_binary_file):
+                adb_push(opencl_binary_file, phone_data_dir, serialno)
+            if os.path.exists(opencl_parameter_file):
+                adb_push(opencl_parameter_file, phone_data_dir, serialno)
 
         adb_push("third_party/nnlib/libhexagon_controller.so",
                  phone_data_dir, serialno)
 
         mace_model_phone_path = ""
-        if build_type == BuildType.proto:
+        if model_graph_format == ModelFormat.file:
             mace_model_phone_path = "%s/%s.pb" % (phone_data_dir, model_tag)
             adb_push(mace_model_path,
                      mace_model_phone_path,
                      serialno)
 
-        if linkshared == 1:
-            adb_push("%s/libmace.so" % shared_library_dir, phone_data_dir,
-                     serialno)
-            adb_push("%s/libgnustl_shared.so" % shared_library_dir,
-                     phone_data_dir,
+        if link_dynamic:
+            adb_push(libmace_dynamic_library_path, phone_data_dir,
                      serialno)
 
-        adb_push("%s/%s" % (mace_run_dir, mace_run_target), phone_data_dir,
+        adb_push("%s/%s" % (target_dir, target_name), phone_data_dir,
                  serialno)
 
         stdout_buff = []
@@ -752,7 +724,7 @@ def tuning_run(abi,
                                       asan_rt_library_names(abi))
             ])
         adb_cmd.extend([
-            "%s/%s" % (phone_data_dir, mace_run_target),
+            "%s/%s" % (phone_data_dir, target_name),
             "--model_name=%s" % model_tag,
             "--input_node=%s" % ",".join(input_nodes),
             "--output_node=%s" % ",".join(output_nodes),
@@ -771,6 +743,8 @@ def tuning_run(abi,
             "--model_file=%s" % mace_model_phone_path,
             "--opencl_binary_file=%s/%s" %
             (phone_data_dir, os.path.basename(opencl_binary_file)),
+            "--opencl_parameter_file=%s/%s" %
+            (phone_data_dir, os.path.basename(opencl_parameter_file)),
         ])
         adb_cmd = ' '.join(adb_cmd)
         cmd_file_name = "%s-%s-%s" % ('cmd_file', model_tag, str(time.time()))
@@ -804,7 +778,7 @@ def tuning_run(abi,
 
         print("Running finished!\n")
 
-        return stdout
+    return stdout
 
 
 def validate_model(abi,
@@ -923,130 +897,9 @@ def validate_model(abi,
     print("Validation done!\n")
 
 
-def build_host_libraries(model_build_type, abi):
-    bazel_build("@com_google_protobuf//:protobuf_lite", abi=abi)
-    bazel_build("//mace/proto:mace_cc", abi=abi)
-    bazel_build("//mace/codegen:generated_opencl", abi=abi)
-    bazel_build("//mace/codegen:generated_tuning_params", abi=abi)
-    bazel_build("//mace/codegen:generated_version", abi=abi)
-    bazel_build("//mace/utils:utils", abi=abi)
-    bazel_build("//mace/core:core", abi=abi)
-    bazel_build("//mace/kernels:kernels", abi=abi)
-    bazel_build("//mace/ops:ops", abi=abi)
-    if model_build_type == BuildType.code:
-        bazel_build(
-            "//mace/codegen:generated_models",
-            abi=abi)
-
-
-def merge_libs(target_soc,
-               serial_num,
-               abi,
-               project_name,
-               build_output_dir,
-               library_output_dir,
-               model_build_type,
-               hexagon_mode):
-    print("* Merge mace lib")
-    project_output_dir = "%s/%s" % (build_output_dir, project_name)
-    hexagon_lib_file = "third_party/nnlib/libhexagon_controller.so"
-    library_dir = "%s/%s" % (project_output_dir, library_output_dir)
-    model_bin_dir = "%s/%s/" % (library_dir, abi)
-
-    if not os.path.exists(model_bin_dir):
-        sh.mkdir("-p", model_bin_dir)
-    if hexagon_mode:
-        sh.cp("-f", hexagon_lib_file, library_dir)
-
-    # make static library
-    mri_stream = ""
-    if abi == "host":
-        mri_stream += "create %s/libmace_%s.a\n" % \
-                      (model_bin_dir, project_name)
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_opencl.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_tuning_params.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_version.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/core/libcore.pic.lo\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/kernels/libkernels.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/utils/libutils.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/proto/libmace_cc.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/external/com_google_protobuf/libprotobuf_lite.pic.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/ops/libops.pic.lo\n")
-        if model_build_type == BuildType.code:
-            mri_stream += (
-                "addlib "
-                "bazel-bin/mace/codegen/libgenerated_models.pic.a\n")
-    else:
-        if not target_soc:
-            mri_stream += "create %s/libmace_%s.a\n" % \
-                          (model_bin_dir, project_name)
-        else:
-            device_name = adb_get_device_name_by_serialno(serial_num)
-            mri_stream += "create %s/libmace_%s.%s.%s.a\n" % \
-                          (model_bin_dir, project_name,
-                           device_name, target_soc)
-        if model_build_type == BuildType.code:
-            mri_stream += (
-                "addlib "
-                "bazel-bin/mace/codegen/libgenerated_models.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_opencl.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_tuning_params.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/codegen/libgenerated_version.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/core/libcore.lo\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/kernels/libkernels.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/utils/libutils.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/proto/libmace_cc.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/external/com_google_protobuf/libprotobuf_lite.a\n")
-        mri_stream += (
-            "addlib "
-            "bazel-bin/mace/ops/libops.lo\n")
-
-    mri_stream += "save\n"
-    mri_stream += "end\n"
-
-    cmd = sh.Command("%s/toolchains/" % os.environ["ANDROID_NDK_HOME"] +
-                     "aarch64-linux-android-4.9/prebuilt/linux-x86_64/" +
-                     "bin/aarch64-linux-android-ar")
-
-    cmd("-M", _in=mri_stream)
-
-    print("Libs merged!\n")
-
-
+################################
+# library
+################################
 def packaging_lib(libmace_output_dir, project_name):
     print("* Package libs for %s" % project_name)
     tar_package_name = "libmace_%s.tar.gz" % project_name
@@ -1057,43 +910,34 @@ def packaging_lib(libmace_output_dir, project_name):
 
     print("Start packaging '%s' libs into %s" % (project_name,
                                                  tar_package_path))
-    sh.tar(
-        "cvzf",
-        "%s" % tar_package_path,
-        glob.glob("%s/*" % project_dir),
-        "--exclude",
-        "%s/_tmp" % project_dir,
-        _fg=True)
+    which_sys = platform.system()
+    if which_sys == "Linux":
+        sh.tar(
+            "cvzf",
+            "%s" % tar_package_path,
+            glob.glob("%s/*" % project_dir),
+            "--exclude",
+            "%s/_tmp" % project_dir,
+            _fg=True)
+    elif which_sys == "Darwin":
+        sh.tar(
+            "--exclude",
+            "%s/_tmp" % project_dir,
+            "-cvzf",
+            "%s" % tar_package_path,
+            glob.glob("%s/*" % project_dir),
+            _fg=True)
     print("Packaging Done!\n")
+    return tar_package_path
 
 
-def build_benchmark_model(abi,
-                          model_output_dir,
-                          hexagon_mode,
-                          enable_openmp,
-                          linkshared=False):
-    if not linkshared:
-        target_name = "benchmark_model_static"
-    else:
-        target_name = "benchmark_model_shared"
-    benchmark_target = "//mace/benchmark:%s" % target_name
-
-    bazel_build(benchmark_target,
-                abi=abi,
-                enable_openmp=enable_openmp,
-                hexagon_mode=hexagon_mode)
-
-    benchmark_binary_file = "%s/%s" % (model_output_dir, target_name)
-    if os.path.exists(benchmark_binary_file):
-        sh.rm("-rf", benchmark_binary_file)
-
-    target_bin = "/".join(bazel_target_to_bin(benchmark_target))
-    sh.cp("-f", target_bin, model_output_dir)
-
-
+################################
+# benchmark
+################################
 def benchmark_model(abi,
                     serialno,
                     benchmark_binary_dir,
+                    benchmark_binary_name,
                     vlog_level,
                     embed_model_data,
                     model_output_dir,
@@ -1105,31 +949,27 @@ def benchmark_model(abi,
                     model_tag,
                     device_type,
                     phone_data_dir,
-                    build_type,
+                    model_graph_format,
                     opencl_binary_file,
-                    shared_library_dir,
+                    opencl_parameter_file,
+                    libmace_dynamic_library_path,
                     omp_num_threads=-1,
                     cpu_affinity_policy=1,
                     gpu_perf_hint=3,
                     gpu_priority_hint=3,
                     input_file_name="model_input",
-                    linkshared=0):
+                    link_dynamic=False):
     print("* Benchmark for %s" % model_tag)
 
-    if linkshared == 0:
-        benchmark_model_target = "benchmark_model_static"
-    else:
-        benchmark_model_target = "benchmark_model_shared"
-
     mace_model_path = ""
-    if build_type == BuildType.proto:
+    if model_graph_format == ModelFormat.file:
         mace_model_path = "%s/%s.pb" % (mace_model_dir, model_tag)
     if abi == "host":
         p = subprocess.Popen(
             [
                 "env",
                 "MACE_CPP_MIN_VLOG_LEVEL=%s" % vlog_level,
-                "%s/%s" % (benchmark_binary_dir, benchmark_model_target),
+                "%s/%s" % (benchmark_binary_dir, benchmark_binary_name),
                 "--model_name=%s" % model_tag,
                 "--input_node=%s" % ",".join(input_nodes),
                 "--output_node=%s" % ",".join(output_nodes),
@@ -1158,23 +998,22 @@ def benchmark_model(abi,
         if not embed_model_data:
             adb_push("%s/%s.data" % (mace_model_dir, model_tag),
                      phone_data_dir, serialno)
-        if device_type == common.DeviceType.GPU \
-                and os.path.exists(opencl_binary_file):
-            adb_push(opencl_binary_file, phone_data_dir, serialno)
+        if device_type == common.DeviceType.GPU:
+            if os.path.exists(opencl_binary_file):
+                adb_push(opencl_binary_file, phone_data_dir, serialno)
+            if os.path.exists(opencl_parameter_file):
+                adb_push(opencl_parameter_file, phone_data_dir, serialno)
         mace_model_phone_path = ""
-        if build_type == BuildType.proto:
+        if model_graph_format == ModelFormat.file:
             mace_model_phone_path = "%s/%s.pb" % (phone_data_dir, model_tag)
             adb_push(mace_model_path,
                      mace_model_phone_path,
                      serialno)
 
-        if linkshared == 1:
-            adb_push("%s/libmace.so" % shared_library_dir, phone_data_dir,
+        if link_dynamic:
+            adb_push(libmace_dynamic_library_path, phone_data_dir,
                      serialno)
-            adb_push("%s/libgnustl_shared.so" % shared_library_dir,
-                     phone_data_dir,
-                     serialno)
-        adb_push("%s/%s" % (benchmark_binary_dir, benchmark_model_target),
+        adb_push("%s/%s" % (benchmark_binary_dir, benchmark_binary_name),
                  phone_data_dir,
                  serialno)
 
@@ -1185,7 +1024,7 @@ def benchmark_model(abi,
             phone_data_dir,
             "MACE_INTERNAL_STORAGE_PATH=%s" % internal_storage_dir,
             "MACE_OPENCL_PROFILING=1",
-            "%s/%s" % (phone_data_dir, benchmark_model_target),
+            "%s/%s" % (phone_data_dir, benchmark_binary_name),
             "--model_name=%s" % model_tag,
             "--input_node=%s" % ",".join(input_nodes),
             "--output_node=%s" % ",".join(output_nodes),
@@ -1201,6 +1040,8 @@ def benchmark_model(abi,
             "--model_file=%s" % mace_model_phone_path,
             "--opencl_binary_file=%s/%s" %
             (phone_data_dir, os.path.basename(opencl_binary_file)),
+            "--opencl_parameter_file=%s/%s" %
+            (phone_data_dir, os.path.basename(opencl_parameter_file)),
         ]
         adb_cmd = ' '.join(adb_cmd)
         cmd_file_name = "%s-%s-%s" % ('cmd_file', model_tag, str(time.time()))

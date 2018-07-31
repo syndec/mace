@@ -14,44 +14,16 @@
 
 // This is a generated file. DO NOT EDIT!
 
-#include <vector>
-#include <string>
-
-#include "mace/core/macros.h"
-#include "mace/public/mace.h"
-#include "mace/utils/env_time.h"
-#include "mace/utils/logging.h"
 
 namespace mace {
-
-extern const unsigned char *LoadModelData(const std::string &model_data_file,
-                                          const size_t &data_size);
-extern void UnloadModelData(const unsigned char *model_data,
-                            const size_t &data_size);
-
 namespace {{tag}} {
 
-{% if embed_model_data %}
 alignas(4) const unsigned char model_data[{{ model_data_size }}] = {
 {% for d in model_data %}{{"0x%02X, " % d }}{%endfor%}
 };
-{% endif %}
 
-const unsigned char *LoadModelData(const std::string &model_data_file) {
-{% if embed_model_data %}
-  MACE_UNUSED(model_data_file);
+const unsigned char *LoadModelData() {
   return model_data;
-{% else %}
-  return mace::LoadModelData(model_data_file, {{ model_data_size }});
-{% endif %}
-}
-
-void UnloadModelData(const unsigned char *model_data) {
-{% if not embed_model_data %}
-  mace::UnloadModelData(model_data, {{ model_data_size }});
-{% else %}
-  MACE_UNUSED(model_data);
-{% endif %}
 }
 
 }  // namespace {{tag}}

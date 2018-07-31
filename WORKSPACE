@@ -1,5 +1,12 @@
 workspace(name = "mace")
 
+# generate version and opencl kernel code.
+load("//repository/git:git_configure.bzl", "git_version_repository")
+load("//repository/opencl-kernel:opencl_kernel_configure.bzl", "encrypt_opencl_kernel_repository")
+
+git_version_repository(name="local_version_config")
+encrypt_opencl_kernel_repository(name="local_opencl_kernel_encrypt")
+
 # proto_library rules implicitly depend on @com_google_protobuf//:protoc,
 # which is the proto-compiler.
 # This statement defines the @com_google_protobuf repo.
@@ -27,11 +34,11 @@ new_http_archive(
 new_http_archive(
     name = "opencl_headers",
     build_file = "third_party/opencl-headers/opencl-headers.BUILD",
-    sha256 = "5dc7087680853b5c825360fc04ca26534f4b9f22ac114c4d3a306bfbec3cd0f2",
-    strip_prefix = "OpenCL-Headers-master",
+    sha256 = "b2b813dd88a7c39eb396afc153070f8f262504a7f956505b2049e223cfc2229b",
+    strip_prefix = "OpenCL-Headers-f039db6764d52388658ef15c30b2237bbda49803",
     urls = [
-        "https://cnbj1.fds.api.xiaomi.com/mace/third-party/OpenCL-Headers/OpenCL-Headers-master.zip",
-        "https://github.com/KhronosGroup/OpenCL-Headers/archive/master.zip",
+        "https://cnbj1.fds.api.xiaomi.com/mace/third-party/OpenCL-Headers/f039db6764d52388658ef15c30b2237bbda49803.zip",
+        "https://github.com/KhronosGroup/OpenCL-Headers/archive/f039db6764d52388658ef15c30b2237bbda49803.zip",
     ],
 )
 
@@ -71,11 +78,10 @@ new_http_archive(
 
 http_archive(
     name = "gemmlowp",
-    sha256 = "b87faa7294dfcc5d678f22a59d2c01ca94ea1e2a3b488c38a95a67889ed0a658",
-    strip_prefix = "gemmlowp-38ebac7b059e84692f53e5938f97a9943c120d98",
+    sha256 = "4160b941d374d1a941776625405c22c32d8cb3d64c772ce8c1683efcd56cbc98",
+    strip_prefix = "gemmlowp-master-cae29f7fd3ca6672012ade2894ca028461003fb4",
     urls = [
-        "http://cnbj1.fds.api.xiaomi.com/mace/third-party/gemmlowp/38ebac7b059e84692f53e5938f97a9943c120d98.zip",
-        "https://github.com/google/gemmlowp/archive/38ebac7b059e84692f53e5938f97a9943c120d98.zip",
+        "https://cnbj1.fds.api.xiaomi.com/mace/third-party/gemmlowp/gemmlowp-master-cae29f7fd3ca6672012ade2894ca028461003fb4.zip",
     ],
 )
 

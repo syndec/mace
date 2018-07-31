@@ -105,19 +105,28 @@ class Tensor {
         dtype_(type),
         buffer_(nullptr),
         is_buffer_owner_(true),
-        name_("") {}
+        unused_(false),
+        name_(""),
+        scale_(0.f),
+        zero_point_(0) {}
 
   Tensor(BufferBase *buffer, DataType dtype)
     : dtype_(dtype),
       buffer_(buffer),
       is_buffer_owner_(false),
-      name_("") {}
+      unused_(false),
+      name_(""),
+      scale_(0.f),
+      zero_point_(0) {}
 
   Tensor(const BufferSlice &buffer_slice, DataType dtype)
       : dtype_(dtype),
         buffer_slice_(buffer_slice),
         is_buffer_owner_(false),
-        name_("") {
+        unused_(false),
+        name_(""),
+        scale_(0.f),
+        zero_point_(0) {
     buffer_ = &buffer_slice_;
   }
 
@@ -132,6 +141,8 @@ class Tensor {
   inline DataType dtype() const { return dtype_; }
 
   inline void SetDtype(DataType dtype) { dtype_ = dtype; }
+
+  inline bool unused() const { return unused_; }
 
   inline const std::vector<index_t> &shape() const { return shape_; }
 
@@ -193,6 +204,10 @@ class Tensor {
   inline T *mutable_data() {
     MACE_CHECK_NOTNULL(buffer_);
     return static_cast<T *>(buffer_->raw_mutable_data());
+  }
+
+  inline void MarkUnused() {
+    unused_ = true;
   }
 
   inline void Clear() {
@@ -354,6 +369,22 @@ class Tensor {
     MACE_DISABLE_COPY_AND_ASSIGN(MappingGuard);
   };
 
+  inline float scale() const {
+    return scale_;
+  }
+
+  inline int32_t zero_point() const {
+    return zero_point_;
+  }
+
+  inline void SetScale(float scale) {
+    scale_ = scale;
+  }
+
+  inline void SetZeroPoint(int32_t zero_point) {
+    zero_point_ = zero_point;
+  }
+
  private:
   Allocator *allocator_;
   DataType dtype_;
@@ -362,7 +393,10 @@ class Tensor {
   BufferBase *buffer_;
   BufferSlice buffer_slice_;
   bool is_buffer_owner_;
+  bool unused_;
   std::string name_;
+  float scale_;
+  int32_t zero_point_;
 
   MACE_DISABLE_COPY_AND_ASSIGN(Tensor);
 };

@@ -22,7 +22,7 @@
 
 namespace mace {
 
-NetBase::NetBase(const std::shared_ptr<const OperatorRegistry> op_registry,
+NetBase::NetBase(const std::shared_ptr<const OperatorRegistryBase> op_registry,
                  const std::shared_ptr<const NetDef> net_def,
                  Workspace *ws,
                  DeviceType type)
@@ -31,16 +31,17 @@ NetBase::NetBase(const std::shared_ptr<const OperatorRegistry> op_registry,
   MACE_UNUSED(type);
 }
 
-SerialNet::SerialNet(const std::shared_ptr<const OperatorRegistry> op_registry,
-                     const std::shared_ptr<const NetDef> net_def,
-                     Workspace *ws,
-                     DeviceType type,
-                     const NetMode mode)
+SerialNet::SerialNet(
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
+    const std::shared_ptr<const NetDef> net_def,
+    Workspace *ws,
+    DeviceType type,
+    const NetMode mode)
     : NetBase(op_registry, net_def, ws, type), device_type_(type) {
   MACE_LATENCY_LOGGER(1, "Constructing SerialNet ", net_def->name());
   for (int idx = 0; idx < net_def->op_size(); ++idx) {
     const auto &operator_def = net_def->op(idx);
-    // TODO(liuqi): refactor based on PB
+    // TODO(liuqi): refactor to add device_type to OperatorDef
     const int op_device =
         ProtoArgHelper::GetOptionalArg<OperatorDef, int>(
             operator_def, "device", static_cast<int>(device_type_));
@@ -130,7 +131,7 @@ MaceStatus SerialNet::Run(RunMetadata *run_metadata) {
 }
 
 std::unique_ptr<NetBase> CreateNet(
-    const std::shared_ptr<const OperatorRegistry> op_registry,
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
     const NetDef &net_def,
     Workspace *ws,
     DeviceType type,
@@ -140,7 +141,7 @@ std::unique_ptr<NetBase> CreateNet(
 }
 
 std::unique_ptr<NetBase> CreateNet(
-    const std::shared_ptr<const OperatorRegistry> op_registry,
+    const std::shared_ptr<const OperatorRegistryBase> op_registry,
     const std::shared_ptr<const NetDef> net_def,
     Workspace *ws,
     DeviceType type,

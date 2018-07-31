@@ -55,6 +55,7 @@ TFSupportedOps = [
     'Div',
     'Min',
     'Max',
+    'Maximum',
     'Neg',
     'Abs',
     'Pow',
@@ -121,6 +122,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
         TFOpType.Div.name: EltwiseType.DIV,
         TFOpType.Min.name: EltwiseType.MIN,
         TFOpType.Max.name: EltwiseType.MAX,
+        TFOpType.Maximum.name: EltwiseType.MAX,
         TFOpType.Neg.name: EltwiseType.NEG,
         TFOpType.Abs.name: EltwiseType.ABS,
         TFOpType.Pow.name: EltwiseType.POW,
@@ -149,6 +151,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
             TFOpType.Div.name: self.convert_elementwise,
             TFOpType.Min.name: self.convert_elementwise,
             TFOpType.Max.name: self.convert_elementwise,
+            TFOpType.Maximum.name: self.convert_elementwise,
             TFOpType.Neg.name: self.convert_elementwise,
             TFOpType.Abs.name: self.convert_elementwise,
             TFOpType.Pow.name: self.convert_elementwise,
@@ -198,6 +201,8 @@ class TensorflowConverter(base_converter.ConverterInterface):
         tf_graph_def = tf.GraphDef()
         with tf.gfile.Open(src_model_file, 'rb') as f:
             tf_graph_def.ParseFromString(f.read())
+
+        self._placeholders = {}
         self.add_shape_info(tf_graph_def)
 
         with tf.Session() as session:
@@ -238,6 +243,8 @@ class TensorflowConverter(base_converter.ConverterInterface):
                         tensor_shape_pb2.TensorShapeProto.Dim(size=i) for i in
                         input_node.shape
                     ])
+                    self._placeholders[node.name + ':0'] = \
+                        np.zeros(shape=input_node.shape, dtype=float)
 
     @staticmethod
     def get_scope(tensor_name):
@@ -286,13 +293,18 @@ class TensorflowConverter(base_converter.ConverterInterface):
 
     # this function tries to infer tensor shape, but some dimension shape
     # may be undefined due to variance of input length
-    @staticmethod
-    def infer_tensor_shape(tensor):
-        shape = tensor.shape.as_list()
+    def infer_tensor_shape(self, tensor):
+        inferred_tensor_shape = tensor.shape.as_list()
+        inferred_success = True
+        for _, dim in enumerate(inferred_tensor_shape):
+            if dim is None:
+                inferred_success = False
+                break
+        if inferred_success:
+            return inferred_tensor_shape
 
-        def normalize_func(dim):
-            return dim if dim else - 1
-        return [normalize_func(dim) for dim in shape]
+        tensor_shape = tf.shape(tensor).eval(feed_dict=self._placeholders)
+        return tensor_shape
 
     def convert_nop(self, tf_op):
         pass
@@ -361,15 +373,21 @@ class TensorflowConverter(base_converter.ConverterInterface):
                 dilation_val = [1, 1]
             dilation_arg.ints.extend(dilation_val)
         else:
-            del op.input[1:]
+            mace_check(len(tf_op.inputs) >= 3,
+                       "deconv should have (>=) 3 inputs.")
             output_shape_arg = op.arg.add()
             output_shape_arg.name = MaceKeyword.mace_output_shape_str
-            output_shape_value = tf_op.inputs[0].eval().astype(np.int32).flat
-            output_shape_arg.ints.extend(output_shape_value)
-            self._skip_tensor.add(tf_op.inputs[0].name)
-            del op.input[0]
-            if len(tf_op.inputs) >= 3:
-                op.input.extend([tf_op.inputs[2].name, tf_op.inputs[1].name])
+            if tf_op.inputs[0].op.type == TFOpType.Const.name:
+                output_shape_value = \
+                    tf_op.inputs[0].eval().astype(np.int32).flat
+                output_shape_arg.ints.extend(output_shape_value)
+            else:
+                output_shape_value = {}
+                output_shape_arg.ints.extend(output_shape_value)
+            del op.input[:]
+            op.input.extend([tf_op.inputs[2].name,
+                             tf_op.inputs[1].name,
+                             tf_op.inputs[0].name])
 
     def convert_elementwise(self, tf_op):
         op = self.convert_general_op(tf_op)
@@ -560,7 +578,7 @@ class TensorflowConverter(base_converter.ConverterInterface):
         axis_arg = op.arg.add()
         axis_arg.name = MaceKeyword.mace_axis_str
         axis = tf_op.inputs[-1].eval().astype(np.int32)
-        axis = 4 + axis if axis < 0 else axis
+        axis = len(op.output_shape[0].dims) + axis if axis < 0 else axis
         axis_arg.i = axis
 
         self._skip_tensor.add(tf_op.inputs[-1].name)

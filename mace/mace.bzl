@@ -47,3 +47,26 @@ def if_openmp_enabled(a):
       "//mace:openmp_enabled": a,
       "//conditions:default": [],
   })
+
+def if_opencl_enabled(a):
+  return select({
+      "//mace:opencl_enabled": a,
+      "//conditions:default": [],
+  })
+
+def mace_version_genrule():
+  native.genrule(
+      name = "mace_version_gen",
+      srcs = [str(Label("@local_version_config//:gen/version"))],
+      outs = ["version/version.cc"],
+      cmd = "cat $(SRCS) > $@;"
+  )
+
+def encrypt_opencl_kernel_genrule():
+  native.genrule(
+      name = "encrypt_opencl_kernel_gen",
+      srcs = [str(Label("@local_opencl_kernel_encrypt//:gen/encrypt_opencl_kernel"))],
+      outs = ["opencl/encrypt_opencl_kernel.cc"],
+      cmd = "cat $(SRCS) > $@;"
+  )
+

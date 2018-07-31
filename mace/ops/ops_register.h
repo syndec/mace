@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MACE_CORE_RUNTIME_OPENCL_OPENCL_WRAPPER_H_
-#define MACE_CORE_RUNTIME_OPENCL_OPENCL_WRAPPER_H_
+#ifndef MACE_OPS_OPS_REGISTER_H_
+#define MACE_OPS_OPS_REGISTER_H_
+
+#include "mace/core/operator.h"
 
 namespace mace {
 
-// These functions are not thread-safe.
-void LoadOpenCLLibrary();
-void UnloadOpenCLLibrary();
+class OperatorRegistry : public OperatorRegistryBase {
+ public:
+  OperatorRegistry();
+  ~OperatorRegistry() = default;
+};
 
 }  // namespace mace
 
-#endif  // MACE_CORE_RUNTIME_OPENCL_OPENCL_WRAPPER_H_
+#endif  // MACE_OPS_OPS_REGISTER_H_

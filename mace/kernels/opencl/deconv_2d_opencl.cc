@@ -95,7 +95,8 @@ MaceStatus Deconv2dOpencl(cl::Kernel *kernel,
         LOG(FATAL) << "Unknown activation type: " << activation;
     }
 
-    *kernel = runtime->BuildKernel("deconv_2d", kernel_name, built_options);
+    MACE_RETURN_IF_ERROR(runtime->BuildKernel("deconv_2d", kernel_name,
+                                              built_options, kernel));
 
     *kwg_size =
         static_cast<uint32_t>(runtime->GetKernelMaxWorkGroupSize(*kernel));
@@ -148,7 +149,8 @@ MaceStatus Deconv2dOpencl(cl::Kernel *kernel,
   std::string tuning_key =
       Concat("deconv2d_opencl_kernel_", activation, output->dim(0),
              output->dim(1), output->dim(2), output->dim(3));
-  TuningOrRun3DKernel(*kernel, tuning_key, gws, lws, future);
+  MACE_RETURN_IF_ERROR(TuningOrRun3DKernel(*kernel, tuning_key,
+                                           gws, lws, future));
 
   if (runtime->IsOutOfRangeCheckEnabled()) {
     (*kernel_error)->Map(nullptr);
@@ -167,13 +169,23 @@ MaceStatus Deconv2dFunctor<DeviceType::GPU, T>::operator()(
     const Tensor *input,
     const Tensor *filter,
     const Tensor *bias,
+    const Tensor *output_shape_tensor,
     Tensor *output,
     StatsFuture *future) {
   MACE_CHECK_NOTNULL(input);
   MACE_CHECK_NOTNULL(filter);
   MACE_CHECK_NOTNULL(output);
 
-  if (output_shape_.size() == 4) {
+  if (!from_caffe_) {
+    if (output_shape_.size() != 4) {
+      MACE_CHECK_NOTNULL(output_shape_tensor);
+      MACE_CHECK(output_shape_tensor->size() == 4);
+      Tensor::MappingGuard output_shape_mapper(output_shape_tensor);
+      auto output_shape_data =
+          output_shape_tensor->data<int32_t>();
+      output_shape_ =
+          std::vector<index_t>(output_shape_data, output_shape_data + 4);
+    }
     paddings_.clear();
     paddings_ = std::vector<int>(2, 0);
     CalcDeconvPaddingAndInputSize(input->shape().data(), filter->shape().data(),
